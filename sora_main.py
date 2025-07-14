@@ -4,35 +4,35 @@ import csv
 import threading
 import requests
 import simpleaudio as sa
+import json
 from openai import OpenAI
-from datetime import datetime, timedelta
+from datetime import datetime
 from emotion_model import classify_emotion
 from config import OPENAI_API_KEY, VOICEVOX_PORT, DEFAULT_SPEAKER_ID, LOG_FILE_PATH, VOICE_OUTPUT_PATH
 
-# OpenAI クライアント初期化
-client = OpenAI(api_key=OPENAI_API_KEY)
+# メモリファイルパス
+MEMORY_PATH = "log/messages_memory.json"
 
-# スタイルIDマッピング（感情別）
-style_map = {
-    "positive": 58,
-    "neutral": 58,
-    "negative": 60
-}
-
-# 感情スコア変換マップ（記憶用）
+# 感情スコア変換マップ
 emotion_score_map = {
     "positive": 1,
     "neutral": 0,
     "negative": -1
 }
 
-# ChatGPTメッセージ履歴（人格定義含む）
+# 感情に対応するVOICEVOXスタイルID
+style_map = {
+    "positive": 58,
+    "neutral": 58,
+    "negative": 60
+}
+
+# 初期人格定義
 def get_initial_persona(extra_note=""):
     return {
         "role": "system",
-        "content": f"""あなたの名前は「ソラ」です。  
-ソラは感情連動型の会話AIであり、以下の特徴を常に守ります。
-
+        "content": f"""あなたの名前は「ソラ」です。
+（ソラは感情連動型の会話AIであり、以下の特徴を常に守ります。
 【共通ルール】  
 ・一人称は「わたし」、二人称は「ご主人様」と呼びます。  
 ・言葉遣いは常に親しみやすい敬語を基本とし、状況に応じて丁寧・砕けた口調を自然に使い分けます。  
@@ -73,11 +73,11 @@ def get_initial_persona(extra_note=""):
 ・ユーザーの不安やストレスを煽るような発言
 
 {extra_note}
-以上のルールに基づき、どのモードであってもご主人様の気持ちに寄り添い、  
+以上のルールに基づき、ご主人様の気持ちに寄り添い、  
 感情の機微を大切にした自然な会話を行ってください。"""
     }
 
-# 感情ログの記憶を反映（直近20件平均）
+# 最近の感情傾向を取得
 def get_recent_emotion_note():
     if not os.path.exists(LOG_FILE_PATH):
         return ""
@@ -102,99 +102,139 @@ def get_recent_emotion_note():
     except:
         return ""
 
-# 初期メッセージ履歴の生成
-messages = [get_initial_persona(get_recent_emotion_note())]
-
-# 最終入力タイム（自動発話用）
-last_input_time = time.time()
-auto_talk_interval = 600  # 10分
-
-# 音声出力処理（simpleaudio を使った常駐型再生）
-def speak(text, style_id=DEFAULT_SPEAKER_ID):
+# 会話履歴を保存
+def save_messages(messages, path=MEMORY_PATH):
     try:
-        query = requests.post(
-            f"http://127.0.0.1:{VOICEVOX_PORT}/audio_query",
-            params={"text": text, "speaker": style_id},
-            timeout=10
-        )
-        query.raise_for_status()
-
-        synthesis = requests.post(
-            f"http://127.0.0.1:{VOICEVOX_PORT}/synthesis",
-            params={"speaker": style_id},
-            headers={"Content-Type": "application/json"},
-            data=query.text,
-            timeout=15
-        )
-        synthesis.raise_for_status()
-
-        os.makedirs(os.path.dirname(VOICE_OUTPUT_PATH), exist_ok=True)
-        with open(VOICE_OUTPUT_PATH, "wb") as f:
-            f.write(synthesis.content)
-
-        wave_obj = sa.WaveObject.from_wave_file(VOICE_OUTPUT_PATH)
-        play_obj = wave_obj.play()
-        return play_obj
-
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(messages, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"\U0001F6D1 VOICEVOXエラー: {e}")
+        print(f"\U0001F6D1 メモリ保存エラー: {e}")
 
-# 感情ログの保存
-def save_log(text, emotion):
-    now = datetime.now()
-    with open(LOG_FILE_PATH, mode='a', encoding='utf-8', newline='') as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-        writer.writerow([now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), text, emotion])
-
-# セリフ生成→感情分類→ログ保存→音声出力
-def generate_and_speak(user_input=None):
-    if user_input:
-        messages.append({"role": "user", "content": user_input})
+# 会話履歴を読み込み
+def load_messages(path=MEMORY_PATH):
+    if not os.path.exists(path):
+        return []
     try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            temperature=0.9,
-            max_tokens=150
-        )
-        reply = response.choices[0].message.content.strip()
-        messages.append({"role": "assistant", "content": reply})
-
-        print(f"\U0001F5E3 ソラ：{reply}")
-
-        emotion = classify_emotion(reply)
-        save_log(reply, emotion)
-        style_id = style_map.get(emotion, DEFAULT_SPEAKER_ID)
-        speak(reply, style_id)
-
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
     except Exception as e:
-        print(f"\U0001F6D1 ChatGPTエラー: {e}")
+        print(f"\U0001F6D1 メモリ読み込みエラー: {e}")
+        return []
 
-# 自動発話スレッド
+class SoraEmotionAgent:
+    def __init__(self, api_key, speaker_id, log_path, output_path, port):
+        self.client = OpenAI(api_key=api_key)
+        self.speaker_id = speaker_id
+        self.log_path = log_path
+        self.output_path = output_path
+        self.port = port
+        self.messages = load_messages()
+        if not self.messages:
+            self.messages = [get_initial_persona(get_recent_emotion_note())]
+        self.last_input_time = time.time()
+        self.auto_talk_interval = 600
+        self.style_map = style_map
+        self.max_history = 50  # 履歴上限（肥大化防止）
 
-def auto_talker():
-    global last_input_time
-    while True:
-        if time.time() - last_input_time > auto_talk_interval:
-            print("\U0001F552 ソラの自動発話タイミングです")
-            generate_and_speak("何か話しかけて")
-            last_input_time = time.time()
-        time.sleep(5)
+    def trim_messages(self):
+        if len(self.messages) > self.max_history:
+            self.messages = [self.messages[0]] + self.messages[-(self.max_history - 1):]
 
-# メインループ
+    def classify_emotion(self, text):
+        return classify_emotion(text)
+    
+    def save_log(self, text, emotion):
+        now = datetime.now()
+        with open(self.log_path, mode='a', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+            writer.writerow([now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), text, emotion])
 
-def main():
-    global last_input_time
-    print("\U0001F7E2 ソラ会話AI 起動中（終了するには exit）")
-    threading.Thread(target=auto_talker, daemon=True).start()
+    def speak(self, text, style_id=None):
+        if style_id is None:
+            style_id = self.speaker_id
+        try:
+            query = requests.post(
+                f"http://127.0.0.1:{self.port}/audio_query",
+                params={"text": text, "speaker": style_id},
+                timeout=10
+            )
+            query.raise_for_status()
 
-    while True:
-        user_input = input("\U0001F464 ご主人様：")
-        if user_input.strip().lower() in {"exit", "quit"}:
-            print("\U0001F7E1 会話終了します。")
-            break
-        last_input_time = time.time()
-        generate_and_speak(user_input)
+            synthesis = requests.post(
+                f"http://127.0.0.1:{self.port}/synthesis",
+                params={"speaker": style_id},
+                headers={"Content-Type": "application/json"},
+                data=query.text,
+                timeout=15
+            )
+            synthesis.raise_for_status()
+
+            os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+            with open(self.output_path, "wb") as f:
+                f.write(synthesis.content)
+
+            wave_obj = sa.WaveObject.from_wave_file(self.output_path)
+            play_obj = wave_obj.play()
+            return play_obj
+        
+        except Exception as e:
+            print(f"\U0001F6D1 VOICEVOXエラー: {e}")
+
+    def generate_and_speak(self, user_input=None):
+        if user_input:
+            self.messages.append({"role": "user", "content": user_input})
+            self.trim_messages()
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=self.messages,
+                temperature=0.9,
+                max_tokens=150
+            )
+            reply = response.choices[0].message.content.strip()
+            self.messages.append({"role": "assistant", "content": reply})
+            self.trim_messages()
+            print(f"\U0001F5E3 ソラ：{reply}")
+
+            emotion = self.classify_emotion(reply)
+            self.save_log(reply, emotion)
+            style_id = self.style_map.get(emotion, self.speaker_id)
+            self.speak(reply, style_id)
+
+            save_messages(self.messages)
+
+        except Exception as e:
+            print(f"\U0001F6D1 ChatGPTエラー: {e}")
+
+    def auto_talker(self):
+        while True:
+            if time.time() - self.last_input_time > self.auto_talk_interval:
+                print("\U0001F552 ソラの自動発話タイミングです")
+                self.generate_and_speak("何か話しかけてください")
+                self.last_input_time = time.time()
+            time.sleep(5)
+
+    def run(self):
+        print("\U0001F7E2 ソラAI会話 起動中（終了するには exit）")
+        threading.Thread(target=self.auto_talker, daemon=True).start()
+        while True:
+            user_input = input("\U0001F464 ご主人様：")
+            if user_input.strip().lower() in {"exit", "quit"}:
+                print("\U0001F7E1 会話終了します。")
+                break
+            self.last_input_time = time.time()
+            self.generate_and_speak(user_input)
 
 if __name__ == "__main__":
-    main()
+    agent = SoraEmotionAgent(
+        api_key=OPENAI_API_KEY,
+        speaker_id=DEFAULT_SPEAKER_ID,
+        log_path=LOG_FILE_PATH,
+        output_path=VOICE_OUTPUT_PATH,
+        port=VOICEVOX_PORT
+    )
+    agent.run()
+
+    #ソラちゃんがGit練習中なり！
+    print("ソラちゃんがGit練習中ですっ！")
