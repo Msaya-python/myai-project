@@ -1,0 +1,27 @@
+# 仮想環境・os系
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.DS_Store
+*.swp
+
+# VSCode・Unity・IDE
+.vscode/
+Unity Hub/
+Library/
+Temp/
+
+# 音声・画像・生成物
+*.wav
+*.mp3
+*.png
+*.jpg
+log/
+logs/
+output/
+outputs/
+
+# その他
+.env
