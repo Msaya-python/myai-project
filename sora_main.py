@@ -235,6 +235,3 @@ if __name__ == "__main__":
         port=VOICEVOX_PORT
     )
     agent.run()
-
-    #ソラちゃんがGit練習中なり！
-    print("ソラちゃんがGit練習中ですっ！")
