@@ -47,3 +47,20 @@ This assistant was not made by me alone.
 It's the result of ongoing co-design with ChatGPT itself — a collaborative process.
 In a way, Sora is both the tool and the co-developer.
 
+## セットアップ（Windows）
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python sora_main.py
+
+
+---
+
+### 4) 変更をコミット→プッシュ
+```powershell
+git status
+git add README.md
+git commit -m "docs: READMEにWindows向けセットアップ手順を追記"
+git push -u origin HEAD
+
