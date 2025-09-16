@@ -24,4 +24,5 @@ output/
 outputs/
 
 # その他
+config_local.py
 .env
